@@ -131,9 +131,7 @@ class Crystal::EventLoop::IOCP < Crystal::EventLoop
     fiber = timer.value.fiber
 
     case timer.value.type
-    in .sleep?
-      # nothing to do
-    in .timeout?
+    in .sleep?, .timeout?
       timer.value.timed_out!
     in .select_timeout?
       return unless select_action = fiber.timeout_select_action
@@ -188,6 +186,15 @@ class Crystal::EventLoop::IOCP < Crystal::EventLoop
     timer = Timer.new(:sleep, Fiber.current, duration)
     add_timer(pointerof(timer))
     Fiber.suspend
+
+    # safety check
+    return if timer.timed_out?
+
+    # try to avoid a double resume if possible, but another thread might be
+    # running the evloop and dequeue the event in parallel, so a "can't resume
+    # dead fiber" can still happen in a MT execution context.
+    delete_timer(pointerof(timer))
+    raise "BUG: #{timer.fiber} called sleep but was manually resumed before the timer expired!"
   end
 
   # Suspend the current fiber for *duration* and returns true if the timer
@@ -214,6 +221,26 @@ class Crystal::EventLoop::IOCP < Crystal::EventLoop
 
   def create_timeout_event(fiber : Fiber) : EventLoop::Event
     FiberEvent.new(:select_timeout, fiber)
+  end
+
+  def open(path : String, flags : Int32, permissions : File::Permissions, blocking : Bool?) : System::FileDescriptor::Handle | WinError
+    access, disposition, attributes = System::File.posix_to_open_opts(flags, permissions, blocking)
+
+    handle = LibC.CreateFileW(
+      System.to_wstr(path),
+      access,
+      LibC::DEFAULT_SHARE_MODE, # UNIX semantics
+      nil,
+      disposition,
+      attributes,
+      LibC::HANDLE.null
+    )
+
+    if handle == LibC::INVALID_HANDLE_VALUE
+      WinError.value
+    else
+      handle.address
+    end
   end
 
   def read(file_descriptor : Crystal::System::FileDescriptor, slice : Bytes) : Int32
