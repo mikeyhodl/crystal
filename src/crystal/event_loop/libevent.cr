@@ -22,7 +22,7 @@ class Crystal::EventLoop::LibEvent < Crystal::EventLoop
 
   {% if flag?(:execution_context) %}
     def run(queue : Fiber::List*, blocking : Bool) : Nil
-      Crystal.trace :evloop, "run", fiber: fiber, blocking: blocking
+      Crystal.trace :evloop, "run", blocking: blocking
       @runnables = queue
       run(blocking)
     ensure
@@ -105,6 +105,18 @@ class Crystal::EventLoop::LibEvent < Crystal::EventLoop
       elsif flags.includes?(LibEvent2::EventFlags::Timeout)
         io_ref.resume_read(timed_out: true)
       end
+    end
+  end
+
+  def open(path : String, flags : Int32, permissions : File::Permissions, blocking : Bool?) : System::FileDescriptor::Handle | Errno
+    path.check_no_null_byte
+
+    fd = LibC.open(path, flags | LibC::O_CLOEXEC, permissions)
+
+    if fd == -1
+      Errno.value
+    else
+      fd
     end
   end
 
