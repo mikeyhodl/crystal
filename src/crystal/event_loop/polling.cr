@@ -137,6 +137,15 @@ abstract class Crystal::EventLoop::Polling < Crystal::EventLoop
     event = Event.new(:sleep, Fiber.current, timeout: duration)
     add_timer(pointerof(event))
     Fiber.suspend
+
+    # safety check
+    return if event.timed_out?
+
+    # try to avoid a double resume if possible, but another thread might be
+    # running the evloop and dequeue the event in parallel, so a "can't resume
+    # dead fiber" can still happen in a MT execution context.
+    delete_timer(pointerof(event))
+    raise "BUG: #{event.fiber} called sleep but was manually resumed before the timer expired!"
   end
 
   def create_timeout_event(fiber : Fiber) : FiberEvent
@@ -144,6 +153,21 @@ abstract class Crystal::EventLoop::Polling < Crystal::EventLoop
   end
 
   # file descriptor interface, see Crystal::EventLoop::FileDescriptor
+
+  def open(path : String, flags : Int32, permissions : File::Permissions, blocking : Bool?) : {System::FileDescriptor::Handle, Bool} | Errno
+    path.check_no_null_byte
+
+    fd = LibC.open(path, flags | LibC::O_CLOEXEC, permissions)
+    return Errno.value if fd == -1
+
+    blocking = !System::File.special_type?(fd) if blocking.nil?
+    unless blocking
+      status_flags = System::FileDescriptor.fcntl(fd, LibC::F_GETFL)
+      System::FileDescriptor.fcntl(fd, LibC::F_SETFL, status_flags | LibC::O_NONBLOCK)
+    end
+
+    {fd, blocking}
+  end
 
   def read(file_descriptor : System::FileDescriptor, slice : Bytes) : Int32
     size = evented_read(file_descriptor, slice, file_descriptor.@read_timeout)
@@ -551,7 +575,7 @@ abstract class Crystal::EventLoop::Polling < Crystal::EventLoop
       return unless select_action.time_expired?
       fiber.@timeout_event.as(FiberEvent).clear
     when .sleep?
-      # nothing to do
+      event.value.timed_out!
     else
       raise RuntimeError.new("BUG: unexpected event in timers: #{event.value}%s\n")
     end
